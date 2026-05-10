@@ -1,0 +1,167 @@
+name: QuickPOS CI Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - "feature/**"
+      - "bugfix/**"
+  workflow_dispatch:
+
+jobs:
+  commit-validation:
+    name: Validate Jira ID
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate pull request title
+        if: github.event_name == 'pull_request'
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          echo "PR title: $PR_TITLE"
+          if ! echo "$PR_TITLE" | grep -Eq "\[?POS-[0-9]+\]?"; then
+            echo "Pull request title must include a Jira ID such as [POS-101]."
+            exit 1
+          fi
+
+      - name: Validate latest commit message
+        run: |
+          COMMIT_MESSAGE="$(git log -1 --pretty=%s)"
+          echo "Latest commit: $COMMIT_MESSAGE"
+          if echo "$COMMIT_MESSAGE" | grep -qi "^Merge "; then
+            echo "Merge commit detected. Skipping Jira ID validation for merge commit."
+            exit 0
+          fi
+          if ! echo "$COMMIT_MESSAGE" | grep -Eq "\[POS-[0-9]+\]"; then
+            echo "Commit message must include a Jira ID like [POS-101]."
+            exit 1
+          fi
+
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    needs: commit-validation
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          tools: composer
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Run PHP CodeSniffer
+        run: vendor/bin/phpcs --standard=PSR12 src tests
+
+  automated-tests:
+    name: Automated Tests
+    runs-on: ubuntu-latest
+    needs: commit-validation
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          tools: composer
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Run PHPUnit tests
+        run: vendor/bin/phpunit --testdox
+
+      - name: Run custom PHP test report
+        run: php tests/run-custom-tests.php
+
+  syntax-check:
+    name: PHP Syntax Check
+    runs-on: ubuntu-latest
+    needs: commit-validation
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Lint PHP files
+        run: find . -name "*.php" -not -path "./vendor/*" -print0 | xargs -0 -n1 php -l
+
+  smoke-test:
+    name: Page Load Smoke Test
+    runs-on: ubuntu-latest
+    needs: commit-validation
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Start PHP development server
+        run: php -S 127.0.0.1:8000 > server.log 2>&1 &
+
+      - name: Check homepage response
+        run: |
+          sleep 2
+          curl -f http://127.0.0.1:8000
+
+      - name: Upload server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickpos-server-log
+          path: server.log
+
+  upload-artifact:
+    name: Upload Build Artifact
+    runs-on: ubuntu-latest
+    needs:
+      - code-quality
+      - automated-tests
+      - syntax-check
+      - smoke-test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Upload project files
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickpos-build
+          path: |
+            index.php
+            thank_you.php
+            assets/
+            src/
+            tests/
+            composer.json
+            phpunit.xml
+            README.md
